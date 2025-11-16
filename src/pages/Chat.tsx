@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useLocation } from "react-router-dom";
 import {
   Send,
   ArrowLeft,
@@ -26,16 +26,29 @@ interface Message {
 }
 
 const Chat = () => {
-  const pdfId = useParams<{ pdfId: string }>().pdfId ?? "e6401bc3-497a-40e8-96be-d28722913b99";
-
+  const params = useParams(); // may contain chatId
+  const { chatId: paramChatId } = params;
+  const location = useLocation();
   const navigate = useNavigate();
   const { toast } = useToast();
+
+  // pdfId comes from query string ?pdf=<pdf_id>
+  const pdfId = new URLSearchParams(location.search).get("pdf") || "";
+
+  // Compute an effective chatId that matches backend expectation ("chat_<uuid>")
+  const effectiveChatId = (() => {
+    if (paramChatId && paramChatId.startsWith("chat_")) return paramChatId;
+    if (pdfId) return `chat_${pdfId}`;
+    return undefined;
+  })();
+
   const [input, setInput] = useState("");
   const [showSlideModal, setShowSlideModal] = useState(false);
   const [selectedAnswer, setSelectedAnswer] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState<boolean>(false);
   const [historyError, setHistoryError] = useState<string>("");
+
   const [pdfUrl, setPdfUrl] = useState<string>("");
   const [isLoadingPdf, setIsLoadingPdf] = useState<boolean>(false);
 
@@ -43,7 +56,6 @@ const Chat = () => {
   function toPlainText(content?: string | any) {
     if (!content && content !== "") return "";
     if (typeof content === "string") {
-      // if it looks like HTML, extract text
       if (/<[a-z][\s\S]*>/i.test(content)) {
         const div = document.createElement("div");
         div.innerHTML = content;
@@ -51,7 +63,6 @@ const Chat = () => {
       }
       return content;
     }
-    // for objects, stringify nicely
     try {
       return typeof content === "object" ? JSON.stringify(content, null, 2) : String(content);
     } catch {
@@ -61,24 +72,17 @@ const Chat = () => {
 
   async function copyToClipboard(rawContent?: string | any) {
     const text = toPlainText(rawContent);
-    // early return if nothing to copy
     if (!text && text !== "") throw new Error("No text to copy");
 
-    // Prefer Clipboard API
     if (navigator.clipboard && navigator.clipboard.writeText) {
       try {
         await navigator.clipboard.writeText(text);
         return;
-      } catch (err) {
-        console.warn("Clipboard API failed:", err);
-        // fallthrough to textarea fallback
-      }
+      } catch {}
     }
 
-    // Fallback - textarea method
     const textarea = document.createElement("textarea");
     textarea.value = text;
-    // Avoid scrolling to bottom
     textarea.style.position = "fixed";
     textarea.style.top = "-9999px";
     document.body.appendChild(textarea);
@@ -86,24 +90,42 @@ const Chat = () => {
     textarea.select();
 
     try {
-      const ok = document.execCommand("copy");
-      if (!ok) throw new Error("execCommand returned false");
+      document.execCommand("copy");
     } finally {
       document.body.removeChild(textarea);
     }
   }
 
-
+  // --------------------------
+  // LOAD CHAT HISTORY (uses effectiveChatId)
+  // --------------------------
   useEffect(() => {
     let isMounted = true;
+
     const loadHistory = async () => {
-      if (!pdfId) return;
+      if (!effectiveChatId) {
+        // No chatId available yet — show friendly assistant message
+        setMessages([
+          {
+            id: "welcome",
+            role: "assistant",
+            content:
+              "Hello! Upload a PDF or open a chat to start. Once you open a chat, ask me anything about the document.",
+            timestamp: "Just now",
+          },
+        ]);
+        return;
+      }
+
       try {
         setIsLoadingHistory(true);
         setHistoryError("");
-        const data = await getChatHistory(pdfId);
+        const data = await getChatHistory(effectiveChatId);
+
         if (!isMounted) return;
+
         const historyMessages: Message[] = [];
+
         data.interactions.forEach((it, idx) => {
           historyMessages.push({
             id: `${idx}-q`,
@@ -118,16 +140,26 @@ const Chat = () => {
             timestamp: it.asked_at,
           });
         });
-        setMessages(historyMessages);
+
+        setMessages(historyMessages.length ? historyMessages : [
+          {
+            id: "welcome",
+            role: "assistant",
+            content:
+              "No previous interactions found. Ask a question to get started!",
+            timestamp: "Just now",
+          },
+        ]);
       } catch (err: any) {
         if (!isMounted) return;
-        console.error(err);
+        console.error("History load failed:", err);
         setHistoryError(err?.message || "Failed to load chat history");
         setMessages([
           {
             id: "welcome",
             role: "assistant",
-            content: "Hello! I'm ready to help you understand this PDF. Ask me any questions about the content, and I'll provide detailed explanations.",
+            content:
+              "Hello! I'm ready to help you understand this PDF. Ask me any questions!",
             timestamp: "Just now",
           },
         ]);
@@ -135,37 +167,59 @@ const Chat = () => {
         if (isMounted) setIsLoadingHistory(false);
       }
     };
+
     loadHistory();
+
     return () => {
       isMounted = false;
     };
-  }, [pdfId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveChatId]); // reload when effectiveChatId changes
 
+  // --------------------------
+  // LOAD PDF (uses pdfId — VERY IMPORTANT)
+  // --------------------------
   useEffect(() => {
     let isMounted = true;
+    let currentUrl = "";
+
     const loadPdf = async () => {
-      
-      if (!pdfId) return;
+      if (!pdfId) {
+        console.warn("No pdfId in URL; skipping PDF load");
+        return;
+      }
+
       try {
         setIsLoadingPdf(true);
         const blob = await getPdf(pdfId);
         if (!isMounted) return;
+
         const url = URL.createObjectURL(blob);
+        currentUrl = url;
         setPdfUrl(url);
       } catch (err: any) {
-        if (!isMounted) return;
-        console.error("Failed to load PDF:", err);
+        console.error("PDF LOAD ERROR:", err);
+        toast({
+          title: "PDF load failed",
+          description: err?.message || String(err),
+          variant: "destructive",
+        });
       } finally {
         if (isMounted) setIsLoadingPdf(false);
       }
     };
+
     loadPdf();
+
     return () => {
       isMounted = false;
-      if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+      if (currentUrl) URL.revokeObjectURL(currentUrl);
     };
-  }, [pdfId]);
+  }, [pdfId, toast]);
 
+  // --------------------------
+  // SEND MESSAGE
+  // --------------------------
   const handleSend = () => {
     if (!input.trim()) return;
 
@@ -173,7 +227,7 @@ const Chat = () => {
       id: Date.now().toString(),
       role: "user",
       content: input,
-      timestamp: "Just now"
+      timestamp: "Just now",
     };
 
     setMessages((m) => [...m, userMessage]);
@@ -182,24 +236,99 @@ const Chat = () => {
     (async () => {
       try {
         const { askQuestion } = await import("@/lib/api");
-        const chatId = pdfId || `chat_${Date.now()}`;
-        const res: any = await askQuestion(chatId, userMessage.content);
-        const aiResp: Message = {
-          id: (Date.now() + 1).toString(),
-          role: "assistant",
-          content: res.answer || "(no answer)",
-          timestamp: "Just now",
-        };
-        setMessages((m) => [...m, aiResp]);
+
+        // We must send chat_id in the form backend expects (e.g. "chat_<uuid>")
+        if (!effectiveChatId) {
+          toast({
+            title: "Missing chat id",
+            description: "Cannot send question because chat id is missing.",
+            variant: "destructive",
+          });
+          return;
+        }
+
+        // Primary attempt
+        try {
+          const res: any = await askQuestion(effectiveChatId, userMessage.content);
+          const aiResp: Message = {
+            id: (Date.now() + 1).toString(),
+            role: "assistant",
+            content: res.answer || "(no answer)",
+            timestamp: "Just now",
+          };
+          setMessages((m) => [...m, aiResp]);
+          return;
+        } catch (err: any) {
+          // If server returned 404 (chat not found), try fallback using chat_<pdfId>
+          console.warn("askQuestion primary attempt failed:", err);
+          // Only attempt fallback if pdfId exists and effectiveChatId was not constructed from pdfId
+          const fallbackChat = pdfId ? `chat_${pdfId}` : undefined;
+          if (fallbackChat && fallbackChat !== effectiveChatId) {
+            try {
+              const { askQuestion: askQ } = await import("@/lib/api");
+              const res2: any = await askQ(fallbackChat, userMessage.content);
+              const aiResp2: Message = {
+                id: (Date.now() + 2).toString(),
+                role: "assistant",
+                content: res2.answer || "(no answer)",
+                timestamp: "Just now",
+              };
+              setMessages((m) => [...m, aiResp2]);
+              // Also navigate to fallback chat route so future requests hit the same chat
+              navigate(`/chat/${fallbackChat}?pdf=${pdfId}`, { replace: true });
+              return;
+            } catch (err2: any) {
+              console.error("askQuestion fallback failed:", err2);
+              toast({
+                title: "Server error",
+                description: err2?.message || "Failed to get answer from server",
+                variant: "destructive",
+              });
+              setMessages((m) => [
+                ...m,
+                {
+                  id: (Date.now() + 3).toString(),
+                  role: "assistant",
+                  content: "Failed to get answer from server.",
+                  timestamp: "Just now",
+                },
+              ]);
+              return;
+            }
+          }
+
+          // No fallback or fallback didn't succeed
+          toast({
+            title: "Server error",
+            description: err?.message || "Failed to get answer from server",
+            variant: "destructive",
+          });
+          setMessages((m) => [
+            ...m,
+            {
+              id: (Date.now() + 4).toString(),
+              role: "assistant",
+              content: "Failed to get answer from server.",
+              timestamp: "Just now",
+            },
+          ]);
+        }
       } catch (err) {
-        console.error(err);
-        const errResp: Message = {
-          id: (Date.now() + 1).toString(),
-          role: "assistant",
-          content: "Failed to get answer from server.",
-          timestamp: "Just now",
-        };
-        setMessages((m) => [...m, errResp]);
+        console.error("Unexpected ask flow error:", err);
+        toast({
+          title: "Error",
+          description: "Unexpected error while sending question",
+          variant: "destructive",
+        });
+        setMessages((m) => [
+          ...m,
+          {
+            id: (Date.now() + 5).toString(),
+            role: "assistant",
+            content: "Failed to get answer from server.",
+            timestamp: "Just now",
+          },
+        ]);
       }
     })();
   };
@@ -210,65 +339,43 @@ const Chat = () => {
         setSelectedAnswer(content || "");
         setShowSlideModal(true);
         break;
+
       case "translate":
         toast({
           title: "Translation",
-          description: "Translation feature coming soon!",
+          description: "Feature coming soon!",
         });
         break;
+
       case "speak":
         if (!content) {
-          toast({
-            title: "Error",
-            description: "No text available to speak.",
-          });
+          toast({ title: "Error", description: "No text available to speak." });
           return;
         }
-
-        // Cancel any previous speech
         window.speechSynthesis.cancel();
-
-        const utterance = new SpeechSynthesisUtterance(content);
-        utterance.lang = "en-US";      // You can change language
-        utterance.rate = 1;            // Speed (0.5–2)
-        utterance.pitch = 1;           // Voice pitch
-        utterance.volume = 1;          // 0–1
-
-        window.speechSynthesis.speak(utterance);
-
-        toast({
-          title: "Speaking...",
-          description: "Text-to-speech started",
-        });
+        {
+          const utterance = new SpeechSynthesisUtterance(content);
+          utterance.lang = "en-US";
+          window.speechSynthesis.speak(utterance);
+        }
         break;
+
       case "copy":
         try {
           await copyToClipboard(content);
-          toast({
-            title: "Copied",
-            description: "Answer copied to clipboard"
-
-          });
+          toast({ title: "Copied", description: "Answer copied to clipboard" });
         } catch (err) {
           console.error("Copy failed:", err);
-          toast({
-            title: "Copy failed",
-            description: "Could not copy text. Try selecting and copying manually."
-          });
+          toast({ title: "Copy failed", description: "Could not copy text." });
         }
         break;
 
       case "like":
-        toast({
-          title: "Liked",
-          description: "Answer saved to favorites",
-        });
+        toast({ title: "Liked", description: "Answer saved to favorites" });
         break;
+
       case "highlight":
-        toast({
-          title: "Highlight",
-          description: "PDF highlight feature coming soon!",
-        });
+        toast({ title: "Highlight", description: "PDF highlight coming soon!" });
         break;
     }
   };
@@ -279,42 +386,39 @@ const Chat = () => {
       <div className="border-b bg-card px-4 py-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => navigate("/dashboard")}
-            >
+            <Button variant="ghost" size="icon" onClick={() => navigate("/dashboard")}>
               <ArrowLeft className="h-5 w-5" />
             </Button>
             <div>
               <h1 className="text-xl font-semibold">PDF Chat</h1>
-              <p className="text-sm text-muted-foreground">Ask questions about your document</p>
+              <p className="text-sm text-muted-foreground">
+                Ask questions about your document
+              </p>
             </div>
           </div>
           <ThemeToggle />
         </div>
       </div>
 
-      {/* Main Content: 2-column layout */}
+      {/* Layout */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Left: PDF Viewer */}
+        {/* PDF Viewer */}
         <div className="w-1/2 border-r bg-card p-4 overflow-auto">
           {isLoadingPdf ? (
-            <div className="flex items-center justify-center h-full text-muted-foreground">Loading PDF…</div>
+            <div className="flex items-center justify-center h-full text-muted-foreground">
+              Loading PDF…
+            </div>
           ) : pdfUrl ? (
-            <iframe
-              src={pdfUrl}
-              className="w-full h-full border rounded"
-              title="PDF Viewer"
-            />
+            <iframe src={pdfUrl} className="w-full h-full border rounded" title="PDF Viewer" />
           ) : (
-            <div className="flex items-center justify-center h-full text-muted-foreground">No PDF loaded</div>
+            <div className="flex items-center justify-center h-full text-muted-foreground">
+              No PDF loaded
+            </div>
           )}
         </div>
 
-        {/* Right: Chat Interface */}
+        {/* Chat Section */}
         <div className="w-1/2 flex flex-col">
-          {/* Chat Messages */}
           <div className="flex-1 overflow-y-auto px-4 py-6">
             <div className="space-y-6">
               {isLoadingHistory && (
@@ -323,80 +427,51 @@ const Chat = () => {
               {!isLoadingHistory && historyError && (
                 <div className="text-red-500 text-sm">{historyError}</div>
               )}
-              {!isLoadingHistory && messages.map((message) => (
-                <div
-                  key={message.id}
-                  className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
-                >
-                  <div className={`max-w-[80%]`}>
-                    <Card className={message.role === "assistant" ? "border-2" : ""}>
-                      <CardContent className="p-4">
-                        <p className="mb-2 whitespace-pre-wrap text-sm">{message.content}</p>
-                        <p className="text-xs text-muted-foreground">{message.timestamp}</p>
-                      </CardContent>
-                    </Card>
 
-                    {message.role === "assistant" && (
-                      <div className="mt-2 flex flex-wrap gap-1">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="gap-1 text-xs h-8"
-                          onClick={() => handleAction("slide", message.content)}
-                        >
-                          <Presentation className="h-3 w-3" />
-                          Slide
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="gap-1 text-xs h-8"
-                          onClick={() => handleAction("translate")}
-                        >
-                          <Globe className="h-3 w-3" />
-                          Translate
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="gap-1 text-xs h-8"
-                          onClick={() => handleAction("speak", message.content)}
-                        >
-                          <Volume2 className="h-3 w-3" />
-                          Speak
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="gap-1 text-xs h-8"
-                          onClick={() => handleAction("copy", message.content)}
-                        >
-                          <Copy className="h-3 w-3" />
-                          Copy
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="gap-1 text-xs h-8"
-                          onClick={() => handleAction("like")}
-                        >
-                          <Heart className="h-3 w-3" />
-                          Like
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="gap-1 text-xs h-8"
-                          onClick={() => handleAction("highlight")}
-                        >
-                          <Highlighter className="h-3 w-3" />
-                          Highlight
-                        </Button>
-                      </div>
-                    )}
+              {!isLoadingHistory &&
+                messages.map((message) => (
+                  <div
+                    key={message.id}
+                    className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
+                  >
+                    <div className="max-w-[80%]">
+                      <Card className={message.role === "assistant" ? "border-2" : ""}>
+                        <CardContent className="p-4">
+                          <p className="mb-2 whitespace-pre-wrap text-sm">{message.content}</p>
+                          <p className="text-xs text-muted-foreground">{message.timestamp}</p>
+                        </CardContent>
+                      </Card>
+
+                      {message.role === "assistant" && (
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          <Button variant="outline" size="sm" className="gap-1 text-xs h-8" onClick={() => handleAction("slide", message.content)}>
+                            <Presentation className="h-3 w-3" /> Slide
+                          </Button>
+
+                          <Button variant="outline" size="sm" className="gap-1 text-xs h-8" onClick={() => handleAction("translate")}>
+                            <Globe className="h-3 w-3" /> Translate
+                          </Button>
+
+                          <Button variant="outline" size="sm" className="gap-1 text-xs h-8" onClick={() => handleAction("speak", message.content)}>
+                            <Volume2 className="h-3 w-3" /> Speak
+                          </Button>
+
+                          <Button variant="outline" size="sm" className="gap-1 text-xs h-8" onClick={() => handleAction("copy", message.content)}>
+                            <Copy className="h-3 w-3" /> Copy
+                          </Button>
+
+                          <Button variant="outline" size="sm" className="gap-1 text-xs h-8" onClick={() => handleAction("like")}>
+                            <Heart className="h-3 w-3" /> Like
+                          </Button>
+
+                          <Button variant="outline" size="sm" className="gap-1 text-xs h-8" onClick={() => handleAction("highlight")}>
+                            <Highlighter className="h-3 w-3" /> Highlight
+                          </Button>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))}
             </div>
           </div>
 
@@ -407,7 +482,7 @@ const Chat = () => {
                 placeholder="Ask a question..."
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                onKeyPress={(e) => e.key === "Enter" && handleSend()}
+                onKeyDown={(e) => e.key === "Enter" && handleSend()}
                 className="flex-1 text-sm"
               />
               <Button onClick={handleSend} size="sm">
@@ -418,11 +493,7 @@ const Chat = () => {
         </div>
       </div>
 
-      <SlideModal
-        isOpen={showSlideModal}
-        onClose={() => setShowSlideModal(false)}
-        content={selectedAnswer}
-      />
+      <SlideModal isOpen={showSlideModal} onClose={() => setShowSlideModal(false)} content={selectedAnswer} />
     </div>
   );
 };

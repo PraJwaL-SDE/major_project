@@ -15,7 +15,7 @@ import tempfile
 import shutil
 
 # Configure Gemini API
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBiXjj_Y36CbTechinj_RV_XWSsV5nMjvE")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     gemini_model = genai.GenerativeModel('gemini-2.5-flash')
@@ -347,50 +347,30 @@ async def ask_question(chat_id: str = Form(...), question: str = Form(...)):
 
 @app.get("/get_pdf/{pdf_id}")
 async def get_pdf(pdf_id: str, filename: str = None):
-    """Serve the uploaded PDF file"""
-    try:
-        storage_dir = "pdf_storage"
-        if not os.path.exists(storage_dir):
-            raise HTTPException(status_code=404, detail="No PDFs stored on server.")
+    print("\n========== GET_PDF DEBUG ==========")
+    print("📥 Requested pdf_id:", pdf_id)
 
+    storage_dir = "pdf_storage"
+    print("📂 Storage exists:", os.path.exists(storage_dir))
+    print("📂 Files in storage:", os.listdir(storage_dir))
+
+    try:
         matches = [f for f in os.listdir(storage_dir) if f.startswith(f"{pdf_id}_")]
-        
-        if filename:
-            target_name = f"{pdf_id}_{filename}"
-            if target_name not in matches:
-                raise HTTPException(status_code=404, detail=f"File '{filename}' not found.")
-            file_path = os.path.join(storage_dir, target_name)
-            return FileResponse(path=file_path, media_type="application/pdf", filename=filename)
+        print("🔍 Matched files:", matches)
 
         if not matches:
-            raise HTTPException(status_code=404, detail="PDF not found.")
+            print("❌ ERROR: No PDF file starts with:", f"{pdf_id}_")
+            raise HTTPException(status_code=404, detail="PDF not found")
 
-        if len(matches) == 1:
-            file_path = os.path.join(storage_dir, matches[0])
-            original_name = matches[0].split("", 1)[1] if "" in matches[0] else matches[0]
-            return FileResponse(path=file_path, media_type="application/pdf", filename=original_name)
+        file_path = os.path.join(storage_dir, matches[0])
+        print("📄 Serving file:", file_path)
 
-        # Multiple files: create zip
-        zip_name = f"{pdf_id}.zip"
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_files_dir = os.path.join(tmpdir, "files")
-            os.makedirs(tmp_files_dir, exist_ok=True)
-            for fname in matches:
-                src = os.path.join(storage_dir, fname)
-                arcname = fname.split("", 1)[1] if "" in fname else fname
-                shutil.copy(src, os.path.join(tmp_files_dir, arcname))
-            zip_path = os.path.join(tmpdir, zip_name)
-            shutil.make_archive(zip_path.replace('.zip', ''), 'zip', tmp_files_dir)
-            
-            # Move to storage for serving
-            final_zip = os.path.join(storage_dir, zip_name)
-            shutil.move(zip_path, final_zip)
-            return FileResponse(path=final_zip, media_type="application/zip", filename=zip_name)
-    
-    except HTTPException:
-        raise
+        return FileResponse(file_path, media_type="application/pdf")
+
     except Exception as e:
+        print("💥 SERVER ERROR:", str(e))
         raise HTTPException(status_code=500, detail=f"Error retrieving PDF: {str(e)}")
+
 
 @app.get("/chat_history/{chat_id}")
 async def get_chat_history(chat_id: str):

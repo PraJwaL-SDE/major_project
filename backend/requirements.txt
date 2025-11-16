@@ -10,3 +10,4 @@ python-multipart
 pydantic
 typing-extensions
 requests
+google-generativeai
