@@ -14,6 +14,7 @@ interface PDF {
   lastUsed: string;
   pages: number;
   thumbnail: string;
+  pdfId: string;
 }
 
 const Dashboard = () => {
@@ -121,8 +122,10 @@ const Dashboard = () => {
         title: "Upload Complete",
         description: res.message || "PDF uploaded",
       });
-      const chatId = res.chat_id || res.pdf_id || `chat_${Date.now()}`;
-      navigate(`/chat/${chatId}?pdf=${res.pdf_id}`);
+      const chatId = res.chat_id;
+      const pdfId = res.pdf_id;
+      if (!chatId) throw new Error("No chat ID returned from server");
+      navigate(`/chat/${chatId}?pdf=${pdfId}`);
     } catch (err: any) {
       console.error(err);
       toast({

@@ -15,7 +15,7 @@ import tempfile
 import shutil
 
 # Configure Gemini API
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyAtIm9LvkjtV3K1eAYpFquJ2VeoHvP-IAs")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     gemini_model = genai.GenerativeModel('gemini-2.5-flash')
@@ -184,17 +184,15 @@ def generate_gemini_response_with_pdf(uploaded_file, question: str, chat_history
 async def upload_pdf(files: List[UploadFile]):
     """
     Upload PDF(s) and create chat session.
-    Files are stored locally and uploaded to Gemini API.
+    Files are stored locally and optionally uploaded to Gemini API.
     """
     try:
-        if not gemini_model:
-            raise HTTPException(status_code=500, detail="Gemini API not configured. Set GEMINI_API_KEY.")
-        
         pdf_id = str(uuid.uuid4())
         chat_id = f"chat_{pdf_id}"
         pdf_filenames = []
         saved_file_paths = []
         total_size_mb = 0
+        gemini_upload_success = False
 
         # Save uploaded files
         for file in files:
@@ -211,11 +209,13 @@ async def upload_pdf(files: List[UploadFile]):
             total_size_mb += file_size
             
             # Upload to Gemini (only first file for now, can be extended)
-            if len(saved_file_paths) == 1:
+            if len(saved_file_paths) == 1 and gemini_model:
                 try:
                     uploaded_file = upload_file_to_gemini(file_path, mime_type="application/pdf")
+                    gemini_upload_success = True
                 except Exception as e:
-                    raise HTTPException(status_code=500, detail=f"Failed to upload to Gemini: {str(e)}")
+                    print(f"⚠ Warning: Failed to upload to Gemini: {str(e)}")
+                    # Don't fail the upload, continue with local storage
 
         # Save to database
         with get_db_connection() as conn:
@@ -225,15 +225,17 @@ async def upload_pdf(files: List[UploadFile]):
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (pdf_id, chat_id, pdf_id, ", ".join(pdf_filenames), 0, round(total_size_mb, 2)))
 
+        gemini_status = "✅ Uploaded to Gemini" if gemini_upload_success else "⚠ Local storage only (Gemini API not configured)"
+        
         return {
             "success": True,
             "chat_id": chat_id,
             "pdf_id": pdf_id,
-            "message": f"✅ Successfully uploaded {len(files)} file(s) ({total_size_mb:.2f} MB) to Gemini",
+            "message": f"✅ Successfully uploaded {len(files)} file(s) ({total_size_mb:.2f} MB) - {gemini_status}",
             "details": {
                 "filenames": pdf_filenames,
                 "total_size_mb": round(total_size_mb, 2),
-                "gemini_file_uploaded": True
+                "gemini_file_uploaded": gemini_upload_success
             }
         }
     except HTTPException:
@@ -245,12 +247,9 @@ async def upload_pdf(files: List[UploadFile]):
 async def ask_question(chat_id: str = Form(...), question: str = Form(...)):
     """
     Ask a question about the uploaded PDF.
-    Sends PDF and question directly to Gemini API.
+    Sends PDF and question directly to Gemini API if available.
     """
     try:
-        if not gemini_model:
-            raise HTTPException(status_code=500, detail="Gemini API not configured.")
-        
         pdf_id = chat_id.replace("chat_", "")
         
         # Get chat metadata
@@ -276,27 +275,38 @@ async def ask_question(chat_id: str = Form(...), question: str = Form(...)):
         if not os.path.exists(pdf_path):
             raise HTTPException(status_code=404, detail="PDF file not found on disk")
         
-        # Upload PDF to Gemini
-        uploaded_file = upload_file_to_gemini(pdf_path)
+        # Try to use Gemini if available, otherwise return placeholder response
+        response_text = ""
+        token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         
-        # Get chat history for context
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT question, answer FROM qa_interactions 
-                WHERE chat_id = ? 
-                ORDER BY created_at DESC 
-                LIMIT 5
-            """, (chat_id,))
-            history_rows = cursor.fetchall()
-        
-        chat_history = [{"question": row[0], "answer": row[1]} for row in reversed(history_rows)]
-        
-        # Generate response with Gemini
-        print(f"🤖 Asking Gemini about PDF: {question}")
-        gemini_resp = generate_gemini_response_with_pdf(uploaded_file, question, chat_history)
-        response_text = gemini_resp.get("text", "").strip()
-        token_usage = gemini_resp.get("token_usage", {})
+        if gemini_model:
+            try:
+                # Upload PDF to Gemini
+                uploaded_file = upload_file_to_gemini(pdf_path)
+                
+                # Get chat history for context
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT question, answer FROM qa_interactions 
+                        WHERE chat_id = ? 
+                        ORDER BY created_at DESC 
+                        LIMIT 5
+                    """, (chat_id,))
+                    history_rows = cursor.fetchall()
+                
+                chat_history = [{"question": row[0], "answer": row[1]} for row in reversed(history_rows)]
+                
+                # Generate response with Gemini
+                print(f"🤖 Asking Gemini about PDF: {question}")
+                gemini_resp = generate_gemini_response_with_pdf(uploaded_file, question, chat_history)
+                response_text = gemini_resp.get("text", "").strip()
+                token_usage = gemini_resp.get("token_usage", {})
+            except Exception as e:
+                print(f"⚠ Gemini API error: {str(e)}")
+                response_text = f"Note: Gemini API is not available. Error: {str(e)}\n\nYour question: {question}\n\nPlease set GEMINI_API_KEY environment variable to enable AI responses."
+        else:
+            response_text = f"Note: Gemini API is not configured. Set GEMINI_API_KEY environment variable to enable AI responses.\n\nYour question: {question}\n\nPDF: {pdf_filename}"
         
         # Personalized message
         days_message = ""
@@ -367,7 +377,7 @@ async def get_pdf(pdf_id: str, filename: str = None):
 
         if len(matches) == 1:
             file_path = os.path.join(storage_dir, matches[0])
-            original_name = matches[0].split("", 1)[1] if "" in matches[0] else matches[0]
+            original_name = matches[0].split("_", 1)[1] if "_" in matches[0] else matches[0]
             return FileResponse(path=file_path, media_type="application/pdf", filename=original_name)
 
         # Multiple files: create zip
@@ -377,7 +387,7 @@ async def get_pdf(pdf_id: str, filename: str = None):
             os.makedirs(tmp_files_dir, exist_ok=True)
             for fname in matches:
                 src = os.path.join(storage_dir, fname)
-                arcname = fname.split("", 1)[1] if "" in fname else fname
+                arcname = fname.split("_", 1)[1] if "_" in fname else fname
                 shutil.copy(src, os.path.join(tmp_files_dir, arcname))
             zip_path = os.path.join(tmpdir, zip_name)
             shutil.make_archive(zip_path.replace('.zip', ''), 'zip', tmp_files_dir)

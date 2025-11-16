@@ -26,7 +26,10 @@ interface Message {
 }
 
 const Chat = () => {
-  const pdfId = useParams<{ pdfId: string }>().pdfId ?? "e6401bc3-497a-40e8-96be-d28722913b99";
+  const params = useParams<{ chatId: string }>();
+  const searchParams = new URLSearchParams(window.location.search);
+  const chatId = params.chatId || searchParams.get("chat_id") || "";
+  const pdfId = searchParams.get("pdf") || "";
 
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -97,11 +100,11 @@ const Chat = () => {
   useEffect(() => {
     let isMounted = true;
     const loadHistory = async () => {
-      if (!pdfId) return;
+      if (!chatId) return;
       try {
         setIsLoadingHistory(true);
         setHistoryError("");
-        const data = await getChatHistory(pdfId);
+        const data = await getChatHistory(chatId);
         if (!isMounted) return;
         const historyMessages: Message[] = [];
         data.interactions.forEach((it, idx) => {
@@ -139,12 +142,11 @@ const Chat = () => {
     return () => {
       isMounted = false;
     };
-  }, [pdfId]);
+  }, [chatId]);
 
   useEffect(() => {
     let isMounted = true;
     const loadPdf = async () => {
-      
       if (!pdfId) return;
       try {
         setIsLoadingPdf(true);
@@ -155,6 +157,11 @@ const Chat = () => {
       } catch (err: any) {
         if (!isMounted) return;
         console.error("Failed to load PDF:", err);
+        toast({
+          title: "Error",
+          description: "Failed to load PDF: " + (err?.message || "Unknown error"),
+          variant: "destructive",
+        });
       } finally {
         if (isMounted) setIsLoadingPdf(false);
       }
@@ -164,7 +171,7 @@ const Chat = () => {
       isMounted = false;
       if (pdfUrl) URL.revokeObjectURL(pdfUrl);
     };
-  }, [pdfId]);
+  }, [pdfId, toast]);
 
   const handleSend = () => {
     if (!input.trim()) return;
@@ -182,7 +189,9 @@ const Chat = () => {
     (async () => {
       try {
         const { askQuestion } = await import("@/lib/api");
-        const chatId = pdfId || `chat_${Date.now()}`;
+        if (!chatId) {
+          throw new Error("No chat session available");
+        }
         const res: any = await askQuestion(chatId, userMessage.content);
         const aiResp: Message = {
           id: (Date.now() + 1).toString(),
@@ -191,12 +200,12 @@ const Chat = () => {
           timestamp: "Just now",
         };
         setMessages((m) => [...m, aiResp]);
-      } catch (err) {
+      } catch (err: any) {
         console.error(err);
         const errResp: Message = {
           id: (Date.now() + 1).toString(),
           role: "assistant",
-          content: "Failed to get answer from server.",
+          content: `Failed to get answer from server: ${err?.message || "Unknown error"}`,
           timestamp: "Just now",
         };
         setMessages((m) => [...m, errResp]);
