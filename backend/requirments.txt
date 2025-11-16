@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+torch
+sentence-transformers
+transformers
+numpy
+faiss-cpu
+pdfplumber
+python-multipart
+pydantic
+typing-extensions
+requests
